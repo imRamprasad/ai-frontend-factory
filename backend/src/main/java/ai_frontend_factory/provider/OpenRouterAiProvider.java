@@ -8,6 +8,7 @@ import ai_frontend_factory.ai.RequirementPriority;
 import ai_frontend_factory.entity.RequirementCategory;
 import ai_frontend_factory.exception.AiProviderException;
 import ai_frontend_factory.exception.AiProviderNotConfiguredException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -19,10 +20,13 @@ import org.springframework.web.client.RestClientResponseException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.net.http.HttpClient;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 
 @Component
 public class OpenRouterAiProvider implements AiProvider {
@@ -34,13 +38,25 @@ public class OpenRouterAiProvider implements AiProvider {
     private final String apiKey;
     private final String model;
 
+    @Autowired
     public OpenRouterAiProvider(
             @Value("${OPENROUTER_API_KEY:}") String apiKey,
             @Value("${OPENROUTER_MODEL:}") String model,
             @Value("${OPENROUTER_BASE_URL:" + DEFAULT_BASE_URL + "}")
-            String baseUrl
+            String baseUrl,
+            @Value("${OPENROUTER_CONNECT_TIMEOUT:${openrouter.connect-timeout:5s}}")
+            String connectTimeout,
+            @Value("${OPENROUTER_READ_TIMEOUT:${openrouter.read-timeout:60s}}")
+            String readTimeout
     ) {
-        this(apiKey, model, baseUrl, RestClient.builder());
+        this(
+                apiKey,
+                model,
+                baseUrl,
+                parseDuration(connectTimeout, Duration.ofSeconds(5)),
+                parseDuration(readTimeout, Duration.ofSeconds(60)),
+                RestClient.builder()
+        );
     }
 
     OpenRouterAiProvider(
@@ -56,6 +72,36 @@ public class OpenRouterAiProvider implements AiProvider {
         String normalizedBaseUrl = normalizeBaseUrl(baseUrl);
         this.restClient = restClientBuilder
                 .baseUrl(normalizedBaseUrl)
+                .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                .build();
+    }
+
+    OpenRouterAiProvider(
+            String apiKey,
+            String model,
+            String baseUrl,
+            Duration connectTimeout,
+            Duration readTimeout,
+            RestClient.Builder restClientBuilder
+    ) {
+        this.apiKey = apiKey == null ? "" : apiKey.trim();
+        this.model = model == null ? "" : model.trim();
+        this.jsonMapper = JsonMapper.builder().build();
+
+        String normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+        Duration safeConnectTimeout = positiveOrDefault(connectTimeout, Duration.ofSeconds(5));
+        Duration safeReadTimeout = positiveOrDefault(readTimeout, Duration.ofSeconds(60));
+
+        HttpClient httpClient = HttpClient.newBuilder()
+                .connectTimeout(safeConnectTimeout)
+                .build();
+        JdkClientHttpRequestFactory requestFactory =
+                new JdkClientHttpRequestFactory(httpClient);
+        requestFactory.setReadTimeout(safeReadTimeout);
+
+        this.restClient = restClientBuilder
+                .baseUrl(normalizedBaseUrl)
+                .requestFactory(requestFactory)
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build();
     }
@@ -290,5 +336,54 @@ public class OpenRouterAiProvider implements AiProvider {
             value = value.substring(0, value.length() - "/chat/completions".length());
         }
         return value;
+    }
+
+    private static Duration positiveOrDefault(Duration value, Duration fallback) {
+        return value != null && !value.isNegative() && !value.isZero()
+                ? value
+                : fallback;
+    }
+
+    private static Duration parseDuration(String value, Duration fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+
+        String normalized = value.trim().toLowerCase();
+        try {
+            if (normalized.endsWith("ms")) {
+                return positiveOrDefault(
+                        Duration.ofMillis(Long.parseLong(normalized.substring(
+                                0, normalized.length() - 2
+                        ).trim())),
+                        fallback
+                );
+            }
+            if (normalized.endsWith("s")) {
+                return positiveOrDefault(
+                        Duration.ofSeconds(Long.parseLong(normalized.substring(
+                                0, normalized.length() - 1
+                        ).trim())),
+                        fallback
+                );
+            }
+            if (normalized.endsWith("m")) {
+                return positiveOrDefault(
+                        Duration.ofMinutes(Long.parseLong(normalized.substring(
+                                0, normalized.length() - 1
+                        ).trim())),
+                        fallback
+                );
+            }
+            if (normalized.startsWith("pt") || normalized.startsWith("p")) {
+                return positiveOrDefault(Duration.parse(value.trim()), fallback);
+            }
+            return positiveOrDefault(
+                    Duration.ofSeconds(Long.parseLong(normalized)),
+                    fallback
+            );
+        } catch (RuntimeException exception) {
+            return fallback;
+        }
     }
 }

@@ -13,6 +13,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
+import java.net.SocketTimeoutException;
+import java.net.ConnectException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -21,6 +23,7 @@ import static org.springframework.test.web.client.match.MockRestRequestMatchers.
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withException;
 
 class OpenRouterAiProviderTest {
 
@@ -128,6 +131,44 @@ class OpenRouterAiProviderTest {
     @Test
     void serverErrorResponseIsMappedSafely() {
         assertHttpStatus(HttpStatus.INTERNAL_SERVER_ERROR, HttpStatus.BAD_GATEWAY);
+    }
+
+    @Test
+    void readTimeoutIsMappedToSafe503() {
+        server.expect(requestTo("https://openrouter.ai/api/v1/chat/completions"))
+                .andRespond(withException(
+                        new SocketTimeoutException("Read timed out")
+                ));
+        OpenRouterAiProvider provider = configuredProvider();
+
+        AiProviderException exception = assertThrows(
+                AiProviderException.class,
+                () -> provider.generateRequirements(new AiRequest("Build a website"))
+        );
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exception.getStatus());
+        assertEquals(
+                "AI provider is temporarily unavailable",
+                exception.getMessage()
+        );
+        server.verify();
+    }
+
+    @Test
+    void connectionTimeoutIsMappedToSafe503() {
+        server.expect(requestTo("https://openrouter.ai/api/v1/chat/completions"))
+                .andRespond(withException(
+                        new ConnectException("Connection timed out")
+                ));
+        OpenRouterAiProvider provider = configuredProvider();
+
+        AiProviderException exception = assertThrows(
+                AiProviderException.class,
+                () -> provider.generateRequirements(new AiRequest("Build a website"))
+        );
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exception.getStatus());
+        server.verify();
     }
 
     private void assertHttpStatus(HttpStatus providerStatus, HttpStatus expectedStatus) {
